@@ -235,10 +235,10 @@ func TestCubicSenderSlowStartPacketLoss(t *testing.T) {
 	expectedSendWindow += maxDatagramSize
 	require.Equal(t, expectedSendWindow, sender.sender.GetCongestionWindow())
 
-	// Now RTO and ensure slow start gets reset.
-	require.True(t, sender.sender.hybridSlowStart.Started())
+	// HyStart++ ended with the loss: the next slow start ends at the threshold it set.
+	require.True(t, sender.sender.hystart.done)
 	sender.sender.OnRetransmissionTimeout(true)
-	require.False(t, sender.sender.hybridSlowStart.Started())
+	require.True(t, sender.sender.hystart.done)
 }
 
 func TestCubicSenderSlowStartPacketLossPRR(t *testing.T) {
@@ -505,7 +505,8 @@ func TestCubicSenderResetAfterConnectionMigration(t *testing.T) {
 	sender.sender.OnConnectionMigration()
 	require.Equal(t, defaultWindowTCP, sender.sender.GetCongestionWindow())
 	require.Equal(t, MaxCongestionWindow, sender.sender.slowStartThreshold)
-	require.False(t, sender.sender.hybridSlowStart.Started())
+	// A new path gets a new initial slow start, with HyStart++.
+	require.False(t, sender.sender.hystart.done)
 }
 
 func TestCubicSenderSlowStartsUpToMaximumCongestionWindow(t *testing.T) {
