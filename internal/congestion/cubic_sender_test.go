@@ -613,3 +613,97 @@ func TestCubicSenderLimitCwndIncreaseInCongestionAvoidance(t *testing.T) {
 	testSender.AckNPackets(2)
 	require.Equal(t, savedCwnd+maxDatagramSize, sender.GetCongestionWindow())
 }
+
+func TestCubicSenderUndoSpuriousLossInSlowStart(t *testing.T) {
+	sender := newTestCubicSender(true)
+	for range 10 {
+		sender.SendAvailableSendWindow()
+		sender.AckNPackets(2)
+	}
+	sender.SendAvailableSendWindow()
+	cwnd := sender.sender.GetCongestionWindow()
+
+	// Three packets "lost" to reordering.
+	lost := []protocol.PacketNumber{sender.ackedPacketNumber + 1, sender.ackedPacketNumber + 2, sender.ackedPacketNumber + 3}
+	sender.LoseNPackets(3)
+	require.False(t, sender.sender.InSlowStart())
+	require.True(t, sender.sender.InRecovery())
+	require.True(t, sender.sender.hystart.done)
+
+	// Only once all of them were acknowledged after all, the reduction is undone.
+	sender.sender.OnSpuriousLoss(lost[0])
+	sender.sender.OnSpuriousLoss(lost[2])
+	require.Less(t, sender.sender.GetCongestionWindow(), cwnd)
+	sender.sender.OnSpuriousLoss(lost[1])
+	require.Equal(t, cwnd, sender.sender.GetCongestionWindow())
+	require.True(t, sender.sender.InSlowStart())
+	require.False(t, sender.sender.InRecovery())
+	require.False(t, sender.sender.hystart.done)
+	require.Equal(t, protocol.MaxByteCount, sender.sender.slowStartThreshold)
+
+	// A second report of the same packet doesn't do anything.
+	sender.LoseNPackets(1)
+	sender.sender.OnSpuriousLoss(lost[1])
+	require.Less(t, sender.sender.GetCongestionWindow(), cwnd)
+}
+
+func TestCubicSenderNoUndoWithRealLoss(t *testing.T) {
+	sender := newTestCubicSender(true)
+	for range 10 {
+		sender.SendAvailableSendWindow()
+		sender.AckNPackets(2)
+	}
+	sender.SendAvailableSendWindow()
+	cwnd := sender.sender.GetCongestionWindow()
+
+	first := sender.ackedPacketNumber + 1
+	sender.LoseNPackets(2) // first is spurious, first+1 really lost
+	sender.sender.OnSpuriousLoss(first)
+	require.Less(t, sender.sender.GetCongestionWindow(), cwnd)
+	require.True(t, sender.sender.InRecovery())
+}
+
+func TestCubicSenderUndoMergesReductions(t *testing.T) {
+	sender := newTestCubicSender(true)
+	for range 10 {
+		sender.SendAvailableSendWindow()
+		sender.AckNPackets(2)
+	}
+	sender.SendAvailableSendWindow()
+	cwnd := sender.sender.GetCongestionWindow()
+
+	first := sender.ackedPacketNumber + 1
+	sender.LoseNPackets(1)
+	afterFirstCut := sender.sender.GetCongestionWindow()
+	// Send packets after the reduction, and lose one of them: a second reduction.
+	for !sender.sender.CanSend(sender.bytesInFlight) {
+		sender.AckNPackets(1)
+	}
+	require.NotZero(t, sender.SendAvailableSendWindow())
+	second := sender.packetNumber - 1
+	sender.LosePacket(second)
+	require.Less(t, sender.sender.GetCongestionWindow(), afterFirstCut)
+
+	sender.sender.OnSpuriousLoss(second)
+	require.Less(t, sender.sender.GetCongestionWindow(), afterFirstCut)
+	sender.sender.OnSpuriousLoss(first)
+	require.Equal(t, cwnd, sender.sender.GetCongestionWindow())
+	require.True(t, sender.sender.InSlowStart())
+}
+
+func TestCubicSenderNoUndoAfterECN(t *testing.T) {
+	sender := newTestCubicSender(true)
+	for range 10 {
+		sender.SendAvailableSendWindow()
+		sender.AckNPackets(2)
+	}
+	sender.SendAvailableSendWindow()
+	cwnd := sender.sender.GetCongestionWindow()
+
+	lost := sender.ackedPacketNumber + 1
+	sender.LoseNPackets(1)
+	// An ECN-CE mark in the same episode
+	sender.sender.OnCongestionEvent(lost+1, 0, sender.bytesInFlight)
+	sender.sender.OnSpuriousLoss(lost)
+	require.Less(t, sender.sender.GetCongestionWindow(), cwnd)
+}

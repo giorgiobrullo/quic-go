@@ -59,6 +59,30 @@ type cubicSender struct {
 
 	lastState qlog.CongestionState
 	qlogger   qlogwriter.Recorder
+
+	undo cutbackUndo
+}
+
+// cutbackUndo remembers the state from before a window reduction, to restore it if every packet
+// whose loss caused it turns out to have been delivered: packets reordered past the loss
+// detection thresholds are declared lost, and the window would otherwise stay reduced (in slow
+// start, with HyStart++ over and Cubic regrowing slowly from a small window) although nothing
+// was congested. Linux TCP undoes such reductions as well.
+type cutbackUndo struct {
+	active    bool
+	undoable  bool // false once an ECN congestion signal is part of the episode
+	startTime monotime.Time
+	// The packets declared lost since the reduction, until reported as spurious.
+	lostPackets map[protocol.PacketNumber]struct{}
+
+	congestionWindow           protocol.ByteCount
+	slowStartThreshold         protocol.ByteCount
+	largestSentAtLastCutback   protocol.PacketNumber
+	lastCutbackExitedSlowstart bool
+	numAckedPackets            uint64
+	cubic                      Cubic
+	hystart                    hystart
+	state                      qlog.CongestionState
 }
 
 var (
@@ -205,8 +229,10 @@ func (c *cubicSender) OnCongestionEvent(packetNumber protocol.PacketNumber, lost
 	// TCP NewReno (RFC6582) says that once a loss occurs, any losses in packets
 	// already sent should be treated as a single loss event, since it's expected.
 	if packetNumber <= c.largestSentAtLastCutback {
+		c.undo.addLoss(packetNumber, lostBytes)
 		return
 	}
+	c.saveForUndo(packetNumber, lostBytes)
 	c.lastCutbackExitedSlowstart = c.InSlowStart()
 	c.hystart.Stop()
 	c.maybeQlogStateChange(qlog.CongestionStateRecovery)
@@ -225,6 +251,76 @@ func (c *cubicSender) OnCongestionEvent(packetNumber protocol.PacketNumber, lost
 	// reset packet count from congestion avoidance mode. We start
 	// counting again when we're out of recovery.
 	c.numAckedPackets = 0
+}
+
+// saveForUndo is called on a window reduction caused by the loss of packetNumber (or, with
+// lostBytes 0, by an ECN congestion signal). Reductions that follow one another while the
+// losses of the first are not resolved yet form one episode, undone as a whole.
+func (c *cubicSender) saveForUndo(packetNumber protocol.PacketNumber, lostBytes protocol.ByteCount) {
+	now := c.clock.Now()
+	// The ack handler forgets lost packets after 3 PTOs: losses still unresolved by then never
+	// will be.
+	if !c.undo.active || now.Sub(c.undo.startTime) > 3*c.rttStats.PTO(true) || len(c.undo.lostPackets) == 0 {
+		c.undo = cutbackUndo{
+			active:                     true,
+			undoable:                   true,
+			startTime:                  now,
+			lostPackets:                make(map[protocol.PacketNumber]struct{}),
+			congestionWindow:           c.congestionWindow,
+			slowStartThreshold:         c.slowStartThreshold,
+			largestSentAtLastCutback:   c.largestSentAtLastCutback,
+			lastCutbackExitedSlowstart: c.lastCutbackExitedSlowstart,
+			numAckedPackets:            c.numAckedPackets,
+			cubic:                      *c.cubic,
+			hystart:                    c.hystart,
+			state:                      c.lastState,
+		}
+	}
+	c.undo.addLoss(packetNumber, lostBytes)
+}
+
+func (u *cutbackUndo) addLoss(packetNumber protocol.PacketNumber, lostBytes protocol.ByteCount) {
+	if !u.active {
+		return
+	}
+	if lostBytes == 0 {
+		u.undoable = false
+		return
+	}
+	u.lostPackets[packetNumber] = struct{}{}
+}
+
+// OnSpuriousLoss is called when a packet that was declared lost is acknowledged.
+func (c *cubicSender) OnSpuriousLoss(packetNumber protocol.PacketNumber) {
+	if !c.undo.active {
+		return
+	}
+	if _, ok := c.undo.lostPackets[packetNumber]; !ok {
+		return
+	}
+	delete(c.undo.lostPackets, packetNumber)
+	if len(c.undo.lostPackets) > 0 || !c.undo.undoable {
+		return
+	}
+	u := c.undo
+	c.undo = cutbackUndo{}
+	c.congestionWindow = min(max(c.congestionWindow, u.congestionWindow), c.maxCongestionWindow())
+	c.slowStartThreshold = max(c.slowStartThreshold, u.slowStartThreshold)
+	c.largestSentAtLastCutback = u.largestSentAtLastCutback
+	c.lastCutbackExitedSlowstart = u.lastCutbackExitedSlowstart
+	c.numAckedPackets = u.numAckedPackets
+	*c.cubic = u.cubic
+	c.hystart = u.hystart
+	c.connStats.CongestionWindow.Store(uint64(c.congestionWindow))
+	if c.InSlowStart() {
+		if c.hystart.InConservativeSlowStart() {
+			c.maybeQlogStateChange(qlog.CongestionStateConservativeSlowStart)
+		} else {
+			c.maybeQlogStateChange(qlog.CongestionStateSlowStart)
+		}
+	} else {
+		c.maybeQlogStateChange(qlog.CongestionStateCongestionAvoidance)
+	}
 }
 
 // Called when we receive an ack. Normal TCP tracks how many packets one ack
@@ -316,6 +412,7 @@ func (c *cubicSender) OnRetransmissionTimeout(packetsRetransmitted bool) {
 	if !packetsRetransmitted {
 		return
 	}
+	c.undo = cutbackUndo{}
 	c.hystart.Stop()
 	c.cubic.Reset()
 	c.slowStartThreshold = c.congestionWindow / 2
@@ -325,6 +422,7 @@ func (c *cubicSender) OnRetransmissionTimeout(packetsRetransmitted bool) {
 
 // OnConnectionMigration is called when the connection is migrated (?)
 func (c *cubicSender) OnConnectionMigration() {
+	c.undo = cutbackUndo{}
 	c.hystart.Reset()
 	c.largestSentPacketNumber = protocol.InvalidPacketNumber
 	c.largestAckedPacketNumber = protocol.InvalidPacketNumber

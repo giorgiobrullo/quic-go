@@ -1618,6 +1618,52 @@ func testSentPacketHandlerRandomized(t *testing.T, seed uint64) {
 	sph.OnLossDetectionTimeout(now)
 }
 
+func TestSentPacketHandlerReportsSpuriousLossesToCongestionController(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	cong := mocks.NewMockSendAlgorithmWithDebugInfos(mockCtrl)
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		true,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		utils.DefaultLogger,
+	)
+	sph.(*sentPacketHandler).congestion = cong
+	cong.EXPECT().OnPacketSent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
+	cong.EXPECT().MaybeExitSlowStart().AnyTimes()
+	cong.EXPECT().OnPacketAcked(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
+	cong.EXPECT().GetCongestionWindow().AnyTimes()
+	cong.EXPECT().InSlowStart().AnyTimes()
+	cong.EXPECT().InRecovery().AnyTimes()
+
+	var packets packetTracker
+	now := monotime.Now()
+	var pns []protocol.PacketNumber
+	for range 5 {
+		pn := sph.PopPacketNumber(protocol.PacketNumberSpaceAppData)
+		sph.SentPacket(now, pn, protocol.InvalidPacketNumber, nil, []Frame{packets.NewPingFrame(pn)}, protocol.Encryption1RTT, protocol.ECNNon, 1000, false, false)
+		pns = append(pns, pn)
+	}
+
+	// pns[1] is declared lost by the packet threshold...
+	now = now.Add(100 * time.Millisecond)
+	cong.EXPECT().OnCongestionEvent(pns[1], protocol.ByteCount(1000), gomock.Any())
+	_, err := sph.ReceivedAck(&wire.AckFrame{AckRanges: ackRanges(pns[0], pns[4])}, protocol.Encryption1RTT, now)
+	require.NoError(t, err)
+	require.Equal(t, []protocol.PacketNumber{pns[1]}, packets.Lost)
+
+	// ... and then acknowledged.
+	now = now.Add(time.Millisecond)
+	cong.EXPECT().OnSpuriousLoss(pns[1])
+	_, err = sph.ReceivedAck(&wire.AckFrame{AckRanges: ackRanges(pns[0], pns[1], pns[4])}, protocol.Encryption1RTT, now)
+	require.NoError(t, err)
+}
+
 func TestSentPacketHandlerSpuriousLoss(t *testing.T) {
 	const rtt = time.Second
 

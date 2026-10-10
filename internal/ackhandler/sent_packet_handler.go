@@ -542,6 +542,7 @@ func (h *sentPacketHandler) detectSpuriousLosses(ack *wire.AckFrame, rcvTime, ac
 	}
 	for _, pn := range spuriousLosses {
 		h.lostPackets.Delete(pn)
+		h.congestion.OnSpuriousLoss(pn)
 	}
 	if h.packetThresholdDisabled != packetThresholdDisabled || h.timeThresholdEighths != timeThresholdEighths {
 		h.qlogLossThresholdUpdated(triggerWait, triggerRTT)
