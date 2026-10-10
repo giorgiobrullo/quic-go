@@ -3,6 +3,7 @@ package ackhandler
 import (
 	"iter"
 	"slices"
+	"time"
 
 	"github.com/quic-go/quic-go/internal/monotime"
 	"github.com/quic-go/quic-go/internal/protocol"
@@ -13,6 +14,8 @@ const maxTrackedLostPackets = 64
 type lostPacket struct {
 	PacketNumber protocol.PacketNumber
 	SendTime     monotime.Time
+	// RTT is the RTT estimate that was used to declare the packet lost.
+	RTT time.Duration
 }
 
 type lostPacketTracker struct {
@@ -27,13 +30,14 @@ func newLostPacketTracker() *lostPacketTracker {
 	}
 }
 
-func (t *lostPacketTracker) Add(p protocol.PacketNumber, sendTime monotime.Time) {
+func (t *lostPacketTracker) Add(p protocol.PacketNumber, sendTime monotime.Time, rtt time.Duration) {
 	if len(t.lostPackets) == maxTrackedLostPackets {
 		t.lostPackets = t.lostPackets[1:]
 	}
 	t.lostPackets = append(t.lostPackets, lostPacket{
 		PacketNumber: p,
 		SendTime:     sendTime,
+		RTT:          rtt,
 	})
 }
 
@@ -46,10 +50,10 @@ func (t *lostPacketTracker) Delete(pn protocol.PacketNumber) {
 	})
 }
 
-func (t *lostPacketTracker) All() iter.Seq2[protocol.PacketNumber, monotime.Time] {
-	return func(yield func(protocol.PacketNumber, monotime.Time) bool) {
+func (t *lostPacketTracker) All() iter.Seq[lostPacket] {
+	return func(yield func(lostPacket) bool) {
 		for _, p := range t.lostPackets {
-			if !yield(p.PacketNumber, p.SendTime) {
+			if !yield(p) {
 				return
 			}
 		}

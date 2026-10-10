@@ -18,8 +18,11 @@ import (
 const (
 	// Maximum reordering in time space before time based loss detection considers a packet lost,
 	// in multiples of the current RTT estimate.
-	// To avoid floating point math, the value here is in units of 1/8.
-	timeThresholdEighths = 1
+	// To avoid floating point math, the value here is in units of 1/8, in excess of one RTT.
+	initialTimeThresholdEighths = 1
+	// In the application-data packet number space, the part of the time threshold in excess of
+	// one RTT is doubled on spurious losses, up to twice the RTT.
+	maxTimeThresholdEighths = 8
 	// Maximum reordering in packets before packet threshold loss detection considers a packet lost.
 	packetThreshold = 3
 	// Before validating the client's address, the server won't send more than 3x bytes than it received.
@@ -76,6 +79,9 @@ type sentPacketHandler struct {
 	// In the application-data packet number space, packet threshold loss detection is
 	// disabled when spurious losses are detected.
 	packetThresholdDisabled bool
+	// In the application-data packet number space, the time threshold is widened when
+	// spurious losses are detected, up to maxTimeThresholdEighths.
+	timeThresholdEighths uint8
 
 	// Do we know that the peer completed address validation yet?
 	// Always true for the server.
@@ -150,6 +156,7 @@ func NewSentPacketHandler(
 		handshakePackets:               newPacketNumberSpace(0, false),
 		appDataPackets:                 newPacketNumberSpace(0, true),
 		lostPackets:                    *newLostPacketTracker(),
+		timeThresholdEighths:           initialTimeThresholdEighths,
 		rttStats:                       rttStats,
 		connStats:                      connStats,
 		congestion:                     congestion,
@@ -430,6 +437,7 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 	if encLevel == protocol.Encryption1RTT {
 		h.detectSpuriousLosses(
 			ack,
+			rcvTime,
 			rcvTime.Add(-min(ack.DelayTime, h.rttStats.MaxAckDelay())),
 		)
 		// clean up lost packet history
@@ -490,12 +498,14 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 	return acked1RTTPacket, nil
 }
 
-func (h *sentPacketHandler) detectSpuriousLosses(ack *wire.AckFrame, ackTime monotime.Time) {
-	var maxPacketReordering protocol.PacketNumber
-	var maxTimeReordering time.Duration
+func (h *sentPacketHandler) detectSpuriousLosses(ack *wire.AckFrame, rcvTime, ackTime monotime.Time) {
+	packetThresholdDisabled := h.packetThresholdDisabled
+	timeThresholdEighths := h.timeThresholdEighths
+	var triggerWait, triggerRTT time.Duration
 	ackRangeIdx := len(ack.AckRanges) - 1
 	var spuriousLosses []protocol.PacketNumber
-	for pn, sendTime := range h.lostPackets.All() {
+	for lp := range h.lostPackets.All() {
+		pn := lp.PacketNumber
 		ackRange := ack.AckRanges[ackRangeIdx]
 		for pn > ackRange.Largest && ackRangeIdx > 0 {
 			ackRangeIdx--
@@ -507,9 +517,17 @@ func (h *sentPacketHandler) detectSpuriousLosses(ack *wire.AckFrame, ackTime mon
 		if pn <= ackRange.Largest {
 			h.packetThresholdDisabled = true
 			packetReordering := h.appDataPackets.history.Difference(ack.LargestAcked(), pn)
-			timeReordering := ackTime.Sub(sendTime)
-			maxPacketReordering = max(maxPacketReordering, packetReordering)
-			maxTimeReordering = max(maxTimeReordering, timeReordering)
+			timeReordering := ackTime.Sub(lp.SendTime)
+			// Widen the time threshold until it would have waited for this ACK.
+			// The ACK delay is not subtracted: it is measured from the receipt of the largest
+			// acknowledged packet, which might have arrived long before this packet did.
+			// The RTT estimate might already include an inflated sample from this ACK,
+			// so use the one that was used to declare the packet lost.
+			for h.timeThresholdEighths < maxTimeThresholdEighths &&
+				lp.RTT*time.Duration(8+h.timeThresholdEighths)/8 <= rcvTime.Sub(lp.SendTime) {
+				h.timeThresholdEighths = min(2*h.timeThresholdEighths, maxTimeThresholdEighths)
+				triggerWait, triggerRTT = rcvTime.Sub(lp.SendTime), lp.RTT
+			}
 
 			if h.qlogger != nil {
 				h.qlogger.RecordEvent(qlog.SpuriousLoss{
@@ -525,6 +543,27 @@ func (h *sentPacketHandler) detectSpuriousLosses(ack *wire.AckFrame, ackTime mon
 	for _, pn := range spuriousLosses {
 		h.lostPackets.Delete(pn)
 	}
+	if h.packetThresholdDisabled != packetThresholdDisabled || h.timeThresholdEighths != timeThresholdEighths {
+		h.qlogLossThresholdUpdated(triggerWait, triggerRTT)
+	}
+}
+
+// qlogLossThresholdUpdated logs the current loss thresholds. If the time threshold was widened,
+// triggerWait and triggerRTT describe the spurious loss that widened it last.
+func (h *sentPacketHandler) qlogLossThresholdUpdated(triggerWait, triggerRTT time.Duration) {
+	if h.qlogger == nil {
+		return
+	}
+	var pt uint64
+	if !h.packetThresholdDisabled {
+		pt = packetThreshold
+	}
+	h.qlogger.RecordEvent(qlog.LossThresholdUpdated{
+		PacketThreshold: pt,
+		TimeThreshold:   float64(8+h.timeThresholdEighths) / 8,
+		TriggerWait:     triggerWait,
+		RTTAtLoss:       triggerRTT,
+	})
 }
 
 // Packets are returned in ascending packet number order.
@@ -793,9 +832,14 @@ func (h *sentPacketHandler) detectLostPackets(now monotime.Time, encLevel protoc
 	pnSpace := h.getPacketNumberSpace(encLevel.PacketNumberSpace())
 	pnSpace.lossTime = 0
 	usePacketThreshold := pnSpace != h.appDataPackets || !h.packetThresholdDisabled
+	timeThresholdEighths := time.Duration(initialTimeThresholdEighths)
+	if pnSpace == h.appDataPackets {
+		timeThresholdEighths = time.Duration(h.timeThresholdEighths)
+	}
 
+	maxRTT := max(h.rttStats.LatestRTT(), h.rttStats.SmoothedRTT())
 	lossDelay := max(
-		max(h.rttStats.LatestRTT(), h.rttStats.SmoothedRTT())*(8+timeThresholdEighths)/8,
+		maxRTT*(8+timeThresholdEighths)/8,
 		protocol.TimerGranularity,
 	)
 
@@ -851,7 +895,7 @@ func (h *sentPacketHandler) detectLostPackets(now monotime.Time, encLevel protoc
 		}
 		if packetLost {
 			if p.Outstanding() && (encLevel == protocol.Encryption0RTT || encLevel == protocol.Encryption1RTT) {
-				h.lostPackets.Add(pn, p.SendTime)
+				h.lostPackets.Add(pn, p.SendTime, maxRTT)
 			}
 			pnSpace.history.DeclareLost(pn)
 			if !p.isPathProbePacket && p.IsAckEliciting() {
@@ -1124,7 +1168,12 @@ func (h *sentPacketHandler) ResetForRetry(now monotime.Time) {
 
 func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSize protocol.ByteCount) {
 	h.rttStats.ResetForPathMigration()
+	lossThresholdUpdated := h.packetThresholdDisabled || h.timeThresholdEighths != initialTimeThresholdEighths
 	h.packetThresholdDisabled = false
+	h.timeThresholdEighths = initialTimeThresholdEighths
+	if lossThresholdUpdated {
+		h.qlogLossThresholdUpdated(0, 0)
+	}
 	h.lostPackets.Reset()
 	for pn, p := range h.appDataPackets.history.Packets() {
 		h.appDataPackets.history.DeclareLost(pn)

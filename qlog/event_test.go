@@ -755,6 +755,34 @@ func TestSpuriousLoss(t *testing.T) {
 	require.InDelta(t, 1337, ev["reordering_time"], float64(1))
 }
 
+func TestLossThresholdUpdated(t *testing.T) {
+	name, ev := testEventEncoding(t, &LossThresholdUpdated{
+		PacketThreshold: 3,
+		TimeThreshold:   1.125,
+	})
+
+	require.Equal(t, "recovery:loss_threshold_updated", name)
+	require.JSONEq(t, `{
+		"packet_threshold": 3,
+		"time_threshold": 1.125
+	}`, ev)
+
+	name, ev = testEventEncoding(t, &LossThresholdUpdated{
+		PacketThreshold: 0,
+		TimeThreshold:   1.25,
+		TriggerWait:     1337 * time.Millisecond,
+		RTTAtLoss:       1200 * time.Millisecond,
+	})
+
+	require.Equal(t, "recovery:loss_threshold_updated", name)
+	require.JSONEq(t, `{
+		"packet_threshold": 0,
+		"time_threshold": 1.25,
+		"trigger_wait": 1337,
+		"rtt_at_loss": 1200
+	}`, ev)
+}
+
 func TestMTUUpdated(t *testing.T) {
 	name, ev := testEventEncoding(t, &MTUUpdated{
 		Value: 1337,

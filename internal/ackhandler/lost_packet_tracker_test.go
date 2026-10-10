@@ -1,7 +1,7 @@
 package ackhandler
 
 import (
-	"maps"
+	"slices"
 	"testing"
 	"time"
 
@@ -15,31 +15,37 @@ func TestLostPacketTracker(t *testing.T) {
 	lt := newLostPacketTracker()
 
 	start := monotime.Now()
-	want := make(map[protocol.PacketNumber]monotime.Time, maxTrackedLostPackets)
+	want := make([]lostPacket, 0, maxTrackedLostPackets)
 	for i := range maxTrackedLostPackets {
-		pn := protocol.PacketNumber(i + 1)
-		sendTime := start.Add(time.Duration(i))
-		lt.Add(pn, sendTime)
-		want[pn] = sendTime
+		p := lostPacket{
+			PacketNumber: protocol.PacketNumber(i + 1),
+			SendTime:     start.Add(time.Duration(i)),
+			RTT:          time.Duration(i+1) * time.Millisecond,
+		}
+		lt.Add(p.PacketNumber, p.SendTime, p.RTT)
+		want = append(want, p)
 	}
-	require.Equal(t, want, maps.Collect(lt.All()))
+	require.Equal(t, want, slices.Collect(lt.All()))
 
 	// Lose one more packet. The first one should be removed.
-	lt.Add(maxTrackedLostPackets+1, start.Add(time.Duration(maxTrackedLostPackets)))
-	delete(want, 1)
-	want[maxTrackedLostPackets+1] = start.Add(time.Duration(maxTrackedLostPackets))
-	require.Equal(t, want, maps.Collect(lt.All()))
+	p := lostPacket{
+		PacketNumber: maxTrackedLostPackets + 1,
+		SendTime:     start.Add(time.Duration(maxTrackedLostPackets)),
+		RTT:          time.Second,
+	}
+	lt.Add(p.PacketNumber, p.SendTime, p.RTT)
+	want = append(want[1:], p)
+	require.Equal(t, want, slices.Collect(lt.All()))
 
 	lt.Delete(5)
 	lt.Delete(10)
-	delete(want, 5)
-	delete(want, 10)
-	require.Equal(t, want, maps.Collect(lt.All()))
+	want = slices.DeleteFunc(want, func(p lostPacket) bool { return p.PacketNumber == 5 || p.PacketNumber == 10 })
+	require.Equal(t, want, slices.Collect(lt.All()))
 
 	lt.Reset()
-	require.Empty(t, maps.Collect(lt.All()))
-	lt.Add(42, start)
-	require.Equal(t, map[protocol.PacketNumber]monotime.Time{42: start}, maps.Collect(lt.All()))
+	require.Empty(t, slices.Collect(lt.All()))
+	lt.Add(42, start, time.Millisecond)
+	require.Equal(t, []lostPacket{{PacketNumber: 42, SendTime: start, RTT: time.Millisecond}}, slices.Collect(lt.All()))
 }
 
 func TestLostPacketTrackerDeleteBefore(t *testing.T) {
@@ -47,17 +53,17 @@ func TestLostPacketTrackerDeleteBefore(t *testing.T) {
 
 	trackedPackets := func(lt *lostPacketTracker) []protocol.PacketNumber {
 		var pns []protocol.PacketNumber
-		for pn := range lt.All() {
-			pns = append(pns, pn)
+		for p := range lt.All() {
+			pns = append(pns, p.PacketNumber)
 		}
 		return pns
 	}
 
 	start := monotime.Now()
-	lt.Add(1, start)
-	lt.Add(5, start.Add(time.Second))
-	lt.Add(8, start.Add(2*time.Second))
-	lt.Add(10, start.Add(3*time.Second))
+	lt.Add(1, start, time.Second)
+	lt.Add(5, start.Add(time.Second), time.Second)
+	lt.Add(8, start.Add(2*time.Second), time.Second)
+	lt.Add(10, start.Add(3*time.Second), time.Second)
 
 	require.Equal(t, []protocol.PacketNumber{1, 5, 8, 10}, trackedPackets(lt))
 

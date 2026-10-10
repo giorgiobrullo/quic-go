@@ -601,6 +601,44 @@ func (e SpuriousLoss) Encode(enc *jsontext.Encoder, _ time.Time) error {
 	return h.err
 }
 
+// LossThresholdUpdated is logged when the thresholds used for loss detection
+// in the application-data packet number space change.
+type LossThresholdUpdated struct {
+	// PacketThreshold is the reordering threshold, in packets.
+	// 0 means that packet threshold loss detection is disabled.
+	PacketThreshold uint64
+	// TimeThreshold is the time threshold, as a multiple of the RTT.
+	TimeThreshold float64
+	// TriggerWait and RTTAtLoss are set if a spurious loss widened the time threshold.
+	// TriggerWait is the time from sending the packet to receiving the ACK for it, without
+	// subtracting the ACK delay, and RTTAtLoss is the RTT estimate that declared it lost.
+	TriggerWait time.Duration
+	RTTAtLoss   time.Duration
+}
+
+var _ qlogwriter.Event = LossThresholdUpdated{}
+
+func (e LossThresholdUpdated) Name() string { return "recovery:loss_threshold_updated" }
+
+func (e LossThresholdUpdated) Encode(enc *jsontext.Encoder, _ time.Time) error {
+	h := encoderHelper{enc: enc}
+	h.WriteToken(jsontext.BeginObject)
+	h.WriteToken(jsontext.String("packet_threshold"))
+	h.WriteToken(jsontext.Uint(e.PacketThreshold))
+	h.WriteToken(jsontext.String("time_threshold"))
+	h.WriteToken(jsontext.Float(e.TimeThreshold))
+	if e.TriggerWait != 0 {
+		h.WriteToken(jsontext.String("trigger_wait"))
+		h.WriteToken(jsontext.Float(milliseconds(e.TriggerWait)))
+	}
+	if e.RTTAtLoss != 0 {
+		h.WriteToken(jsontext.String("rtt_at_loss"))
+		h.WriteToken(jsontext.Float(milliseconds(e.RTTAtLoss)))
+	}
+	h.WriteToken(jsontext.EndObject)
+	return h.err
+}
+
 type KeyUpdated struct {
 	Trigger  KeyUpdateTrigger
 	KeyType  KeyType
