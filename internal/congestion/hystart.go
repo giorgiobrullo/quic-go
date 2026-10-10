@@ -96,6 +96,13 @@ func (h *hystart) OnRTTSample(rtt time.Duration) (exitSlowStart bool) {
 			}
 		}
 	}
+	// Only the first samples of a round count, as in msquic (and Linux's HyStart): they show the
+	// queue that the previous round left at the bottleneck. RFC 9406 takes the minimum over the
+	// whole round, but on a path that delivers in bursts some packets of every round come back at
+	// the path's minimum RTT while the queue holds tens of milliseconds, and those kept ending CSS.
+	if h.rttSampleCount >= hystartNRTTSample {
+		return false
+	}
 	h.currentRoundMinRTT = min(h.currentRoundMinRTT, rtt)
 	h.rttSampleCount++
 	if h.rttSampleCount < hystartNRTTSample || h.switchedThisRound {
