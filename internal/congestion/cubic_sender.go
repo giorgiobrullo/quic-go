@@ -273,8 +273,13 @@ func (c *cubicSender) isCwndLimited(bytesInFlight protocol.ByteCount) bool {
 		return true
 	}
 	availableBytes := congestionWindow - bytesInFlight
-	slowStartLimited := c.InSlowStart() && bytesInFlight > congestionWindow/2
-	return slowStartLimited || availableBytes <= maxBurstPackets*c.maxDatagramSize
+	// The window counts as used, and may grow, while more than half of it is in flight, as in
+	// RFC 7661 (congestion window validation) and Linux TCP, and as slow start already did here.
+	// Requiring the flight to come within a few packets of the window left a sender that the
+	// application feeds in bursts (an HTTP reverse proxy) application limited between bursts:
+	// each of those ACKs reset the Cubic epoch, and the window stopped growing after a loss.
+	halfUsed := bytesInFlight > congestionWindow/2
+	return halfUsed || availableBytes <= maxBurstPackets*c.maxDatagramSize
 }
 
 // BandwidthEstimate returns the current bandwidth estimate
