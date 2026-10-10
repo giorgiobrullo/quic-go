@@ -1358,7 +1358,7 @@ func TestSentPacketHandlerCongestion(t *testing.T) {
 	// to the congestion controller.
 	ackTime := sendTimes[3].Add(time.Second)
 	gomock.InOrder(
-		cong.EXPECT().MaybeExitSlowStart(),
+		cong.EXPECT().MaybeExitSlowStart(protocol.ByteCount(5000)),
 		cong.EXPECT().OnCongestionEvent(pns[0], protocol.ByteCount(1000), protocol.ByteCount(5000)),
 		cong.EXPECT().OnPacketAcked(pns[2], protocol.ByteCount(1000), protocol.ByteCount(5000), ackTime),
 		cong.EXPECT().OnPacketAcked(pns[3], protocol.ByteCount(1000), protocol.ByteCount(5000), ackTime),
@@ -1497,7 +1497,7 @@ func TestSentPacketHandlerECN(t *testing.T) {
 	cong := mocks.NewMockSendAlgorithmWithDebugInfos(mockCtrl)
 	cong.EXPECT().OnPacketSent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
 	cong.EXPECT().OnPacketAcked(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
-	cong.EXPECT().MaybeExitSlowStart().AnyTimes()
+	cong.EXPECT().MaybeExitSlowStart(gomock.Any()).AnyTimes()
 	ecnHandler := NewMockECNHandler(mockCtrl)
 	sph := NewSentPacketHandler(
 		0,

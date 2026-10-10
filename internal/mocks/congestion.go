@@ -232,15 +232,15 @@ func (c *MockSendAlgorithmWithDebugInfosInSlowStartCall) DoAndReturn(f func() bo
 }
 
 // MaybeExitSlowStart mocks base method.
-func (m *MockSendAlgorithmWithDebugInfos) MaybeExitSlowStart() {
+func (m *MockSendAlgorithmWithDebugInfos) MaybeExitSlowStart(priorInFlight protocol.ByteCount) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "MaybeExitSlowStart")
+	m.ctrl.Call(m, "MaybeExitSlowStart", priorInFlight)
 }
 
 // MaybeExitSlowStart indicates an expected call of MaybeExitSlowStart.
-func (mr *MockSendAlgorithmWithDebugInfosMockRecorder) MaybeExitSlowStart() *MockSendAlgorithmWithDebugInfosMaybeExitSlowStartCall {
+func (mr *MockSendAlgorithmWithDebugInfosMockRecorder) MaybeExitSlowStart(priorInFlight any) *MockSendAlgorithmWithDebugInfosMaybeExitSlowStartCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MaybeExitSlowStart", reflect.TypeOf((*MockSendAlgorithmWithDebugInfos)(nil).MaybeExitSlowStart))
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MaybeExitSlowStart", reflect.TypeOf((*MockSendAlgorithmWithDebugInfos)(nil).MaybeExitSlowStart), priorInFlight)
 	return &MockSendAlgorithmWithDebugInfosMaybeExitSlowStartCall{Call: call}
 }
 
@@ -256,13 +256,13 @@ func (c *MockSendAlgorithmWithDebugInfosMaybeExitSlowStartCall) Return() *MockSe
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockSendAlgorithmWithDebugInfosMaybeExitSlowStartCall) Do(f func()) *MockSendAlgorithmWithDebugInfosMaybeExitSlowStartCall {
+func (c *MockSendAlgorithmWithDebugInfosMaybeExitSlowStartCall) Do(f func(protocol.ByteCount)) *MockSendAlgorithmWithDebugInfosMaybeExitSlowStartCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockSendAlgorithmWithDebugInfosMaybeExitSlowStartCall) DoAndReturn(f func()) *MockSendAlgorithmWithDebugInfosMaybeExitSlowStartCall {
+func (c *MockSendAlgorithmWithDebugInfosMaybeExitSlowStartCall) DoAndReturn(f func(protocol.ByteCount)) *MockSendAlgorithmWithDebugInfosMaybeExitSlowStartCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
