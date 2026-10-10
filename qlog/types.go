@@ -264,6 +264,8 @@ type CongestionState string
 const (
 	// CongestionStateSlowStart is the slow start phase of Reno / Cubic
 	CongestionStateSlowStart CongestionState = "slow_start"
+	// CongestionStateConservativeSlowStart is HyStart++'s Conservative Slow Start (RFC 9406)
+	CongestionStateConservativeSlowStart CongestionState = "conservative_slow_start"
 	// CongestionStateCongestionAvoidance is the congestion avoidance phase of Reno / Cubic
 	CongestionStateCongestionAvoidance CongestionState = "congestion_avoidance"
 	// CongestionStateRecovery is the recovery phase of Reno / Cubic

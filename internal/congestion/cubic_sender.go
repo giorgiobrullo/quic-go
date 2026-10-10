@@ -38,12 +38,12 @@ func (s *renoUndoState) Reset() {
 }
 
 type cubicSender struct {
-	hybridSlowStart HybridSlowStart
-	rttStats        *utils.RTTStats
-	connStats       *utils.ConnectionStats
-	cubic           *Cubic
-	pacer           *pacer
-	clock           Clock
+	hystart   hystart
+	rttStats  *utils.RTTStats
+	connStats *utils.ConnectionStats
+	cubic     *Cubic
+	pacer     *pacer
+	clock     Clock
 
 	reno bool
 
@@ -118,6 +118,7 @@ func newCubicSender(
 	qlogger qlogwriter.Recorder,
 ) *cubicSender {
 	c := &cubicSender{
+		hystart:                    newHystart(),
 		rttStats:                   rttStats,
 		connStats:                  connStats,
 		largestSentPacketNumber:    protocol.InvalidPacketNumber,
@@ -173,7 +174,7 @@ func (c *cubicSender) OnPacketSent(
 		return
 	}
 	c.largestSentPacketNumber = packetNumber
-	c.hybridSlowStart.OnPacketSent(packetNumber)
+	c.hystart.OnPacketSent(packetNumber)
 }
 
 func (c *cubicSender) CanSend(bytesInFlight protocol.ByteCount) bool {
@@ -193,8 +194,7 @@ func (c *cubicSender) GetCongestionWindow() protocol.ByteCount {
 }
 
 func (c *cubicSender) MaybeExitSlowStart() {
-	if c.InSlowStart() &&
-		c.hybridSlowStart.ShouldExitSlowStart(c.rttStats.LatestRTT(), c.rttStats.MinRTT(), c.GetCongestionWindow()/c.maxDatagramSize) {
+	if c.InSlowStart() && c.hystart.OnRTTSample(c.rttStats.LatestRTT()) {
 		// exit slow start
 		c.slowStartThreshold = c.congestionWindow
 		c.maybeQlogStateChange(qlog.CongestionStateCongestionAvoidance)
@@ -214,7 +214,7 @@ func (c *cubicSender) OnPacketAcked(
 	c.maybeIncreaseCwnd(ackedPacketNumber, ackedBytes, priorInFlight, eventTime)
 	c.connStats.CongestionWindow.Store(uint64(c.congestionWindow))
 	if c.InSlowStart() {
-		c.hybridSlowStart.OnPacketAcked(ackedPacketNumber)
+		c.hystart.OnPacketAcked(ackedPacketNumber)
 	}
 }
 
@@ -242,6 +242,7 @@ func (c *cubicSender) OnCongestionEvent(packetNumber protocol.PacketNumber, lost
 	}
 
 	c.lastCutbackExitedSlowstart = c.InSlowStart()
+	c.hystart.Stop()
 	c.maybeQlogStateChange(qlog.CongestionStateRecovery)
 
 	if c.reno {
@@ -313,6 +314,12 @@ func (c *cubicSender) maybeIncreaseCwnd(
 		return
 	}
 	if c.InSlowStart() {
+		if c.hystart.InConservativeSlowStart() {
+			// HyStart++ Conservative Slow Start: a quarter of the slow start growth.
+			c.congestionWindow += c.maxDatagramSize / hystartCSSGrowthDivisor
+			c.maybeQlogStateChange(qlog.CongestionStateConservativeSlowStart)
+			return
+		}
 		// TCP slow start, exponential growth, increase by one for each ACK.
 		c.congestionWindow += c.maxDatagramSize
 		c.maybeQlogStateChange(qlog.CongestionStateSlowStart)
@@ -361,7 +368,9 @@ func (c *cubicSender) BandwidthEstimate() Bandwidth {
 }
 
 func (c *cubicSender) pacingRate() Bandwidth {
-	if c.InSlowStart() {
+	// Conservative Slow Start grows the window by a quarter per round, it doesn't need to send at
+	// twice the rate: that only builds a queue at the bottleneck.
+	if c.InSlowStart() && !c.hystart.InConservativeSlowStart() {
 		// Allow slow start to double the sending rate every RTT.
 		return 2 * c.BandwidthEstimate()
 	}
@@ -376,7 +385,7 @@ func (c *cubicSender) OnRetransmissionTimeout(packetsRetransmitted bool) {
 	if !packetsRetransmitted {
 		return
 	}
-	c.hybridSlowStart.Restart()
+	c.hystart.Stop()
 	c.cubic.Reset()
 	c.slowStartThreshold = c.congestionWindow / 2
 	c.congestionWindow = c.minCongestionWindow()
@@ -385,7 +394,7 @@ func (c *cubicSender) OnRetransmissionTimeout(packetsRetransmitted bool) {
 
 // OnConnectionMigration is called when the connection is migrated (?)
 func (c *cubicSender) OnConnectionMigration() {
-	c.hybridSlowStart.Restart()
+	c.hystart.Reset()
 	c.largestSentPacketNumber = protocol.InvalidPacketNumber
 	c.largestAckedPacketNumber = protocol.InvalidPacketNumber
 	c.largestSentAtLastCutback = protocol.InvalidPacketNumber
