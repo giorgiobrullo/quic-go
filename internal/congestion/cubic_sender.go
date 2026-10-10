@@ -2,6 +2,7 @@ package congestion
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/quic-go/quic-go/internal/monotime"
 	"github.com/quic-go/quic-go/internal/protocol"
@@ -20,13 +21,36 @@ const (
 	initialCongestionWindow    = 32
 )
 
+// slowStartExit selects how the initial slow start ends before a loss.
+type slowStartExit uint8
+
+const (
+	slowStartExitHystart       slowStartExit = iota // HyStart++ (RFC 9406)
+	slowStartExitSearch                             // SEARCH, with its drain phase
+	slowStartExitSearchNoDrain                      // SEARCH, entering congestion avoidance at once (as neqo)
+)
+
+// defaultSlowStartExit can be changed with QUIC_GO_SLOW_START=hystart|search|search-nodrain.
+var defaultSlowStartExit = func() slowStartExit {
+	switch os.Getenv("QUIC_GO_SLOW_START") {
+	case "search":
+		return slowStartExitSearch
+	case "search-nodrain":
+		return slowStartExitSearchNoDrain
+	default:
+		return slowStartExitHystart
+	}
+}()
+
 type cubicSender struct {
-	hystart   hystart
-	rttStats  *utils.RTTStats
-	connStats *utils.ConnectionStats
-	cubic     *Cubic
-	pacer     *pacer
-	clock     Clock
+	slowStartExit slowStartExit
+	hystart       hystart
+	search        search
+	rttStats      *utils.RTTStats
+	connStats     *utils.ConnectionStats
+	cubic         *Cubic
+	pacer         *pacer
+	clock         Clock
 
 	reno bool
 
@@ -82,6 +106,7 @@ type cutbackUndo struct {
 	numAckedPackets            uint64
 	cubic                      Cubic
 	hystart                    hystart
+	search                     search
 	state                      qlog.CongestionState
 }
 
@@ -122,7 +147,9 @@ func newCubicSender(
 	qlogger qlogwriter.Recorder,
 ) *cubicSender {
 	c := &cubicSender{
+		slowStartExit:              defaultSlowStartExit,
 		hystart:                    newHystart(),
+		search:                     newSearch(initialCongestionWindow),
 		rttStats:                   rttStats,
 		connStats:                  connStats,
 		largestSentPacketNumber:    protocol.InvalidPacketNumber,
@@ -179,6 +206,7 @@ func (c *cubicSender) OnPacketSent(
 	}
 	c.largestSentPacketNumber = packetNumber
 	c.hystart.OnPacketSent(packetNumber)
+	c.search.OnPacketSent(bytes)
 }
 
 func (c *cubicSender) CanSend(bytesInFlight protocol.ByteCount) bool {
@@ -200,6 +228,10 @@ func (c *cubicSender) GetCongestionWindow() protocol.ByteCount {
 // MaybeExitSlowStart is called for every ACK that yields an RTT sample, with the bytes in flight
 // before it.
 func (c *cubicSender) MaybeExitSlowStart(priorInFlight protocol.ByteCount) {
+	if c.slowStartExit != slowStartExitHystart {
+		c.maybeExitSlowStartSearch(priorInFlight)
+		return
+	}
 	// HyStart++ looks for the queue that the window builds at the bottleneck. While the sender
 	// doesn't use its window (an application feeding data in bursts), that queue drains, and the
 	// RTT samples close to the path's minimum would end Conservative Slow Start: slow start then
@@ -214,6 +246,34 @@ func (c *cubicSender) MaybeExitSlowStart(priorInFlight protocol.ByteCount) {
 	}
 }
 
+func (c *cubicSender) maybeExitSlowStartSearch(priorInFlight protocol.ByteCount) {
+	if !c.InSlowStart() {
+		return
+	}
+	if !c.search.inDrain {
+		if !c.search.OnRTTSample(c.clock.Now(), c.rttStats.LatestRTT()) {
+			return
+		}
+		if c.slowStartExit == slowStartExitSearchNoDrain {
+			c.search.Stop()
+			c.exitSlowStart()
+			return
+		}
+	}
+	// Drain phase: converge toward the window SEARCH estimated for the path's capacity.
+	c.congestionWindow = min(c.congestionWindow, c.search.DrainWindow(priorInFlight, c.maxDatagramSize))
+	c.connStats.CongestionWindow.Store(uint64(c.congestionWindow))
+	if c.congestionWindow <= c.search.targetCwnd {
+		c.search.Stop()
+		c.exitSlowStart()
+	}
+}
+
+func (c *cubicSender) exitSlowStart() {
+	c.slowStartThreshold = c.congestionWindow
+	c.maybeQlogStateChange(qlog.CongestionStateCongestionAvoidance)
+}
+
 func (c *cubicSender) OnPacketAcked(
 	ackedPacketNumber protocol.PacketNumber,
 	ackedBytes protocol.ByteCount,
@@ -221,6 +281,7 @@ func (c *cubicSender) OnPacketAcked(
 	eventTime monotime.Time,
 ) {
 	c.largestAckedPacketNumber = max(ackedPacketNumber, c.largestAckedPacketNumber)
+	c.search.OnPacketAcked(ackedBytes)
 	if c.InRecovery() {
 		return
 	}
@@ -244,6 +305,7 @@ func (c *cubicSender) OnCongestionEvent(packetNumber protocol.PacketNumber, lost
 	c.saveForUndo(packetNumber, lostBytes)
 	c.lastCutbackExitedSlowstart = c.InSlowStart()
 	c.hystart.Stop()
+	c.search.Stop()
 	c.maybeQlogStateChange(qlog.CongestionStateRecovery)
 
 	if c.reno {
@@ -282,6 +344,7 @@ func (c *cubicSender) saveForUndo(packetNumber protocol.PacketNumber, lostBytes 
 			numAckedPackets:            c.numAckedPackets,
 			cubic:                      *c.cubic,
 			hystart:                    c.hystart,
+			search:                     c.search,
 			state:                      c.lastState,
 		}
 	}
@@ -320,6 +383,7 @@ func (c *cubicSender) OnSpuriousLoss(packetNumber protocol.PacketNumber) {
 	c.numAckedPackets = u.numAckedPackets
 	*c.cubic = u.cubic
 	c.hystart = u.hystart
+	c.search = u.search
 	c.connStats.CongestionWindow.Store(uint64(c.congestionWindow))
 	if c.InSlowStart() {
 		if c.hystart.InConservativeSlowStart() {
@@ -351,6 +415,10 @@ func (c *cubicSender) maybeIncreaseCwnd(
 		return
 	}
 	if c.InSlowStart() {
+		if c.search.inDrain {
+			// the drain phase sets the window
+			return
+		}
 		if c.hystart.InConservativeSlowStart() {
 			// HyStart++ Conservative Slow Start: a quarter of the slow start growth.
 			c.congestionWindow += c.maxDatagramSize / hystartCSSGrowthDivisor
@@ -423,6 +491,7 @@ func (c *cubicSender) OnRetransmissionTimeout(packetsRetransmitted bool) {
 	}
 	c.undo = cutbackUndo{}
 	c.hystart.Stop()
+	c.search.Stop()
 	c.cubic.Reset()
 	c.slowStartThreshold = c.congestionWindow / 2
 	c.congestionWindow = c.minCongestionWindow()
@@ -433,6 +502,7 @@ func (c *cubicSender) OnRetransmissionTimeout(packetsRetransmitted bool) {
 func (c *cubicSender) OnConnectionMigration() {
 	c.undo = cutbackUndo{}
 	c.hystart.Reset()
+	c.search.Reset()
 	c.largestSentPacketNumber = protocol.InvalidPacketNumber
 	c.largestAckedPacketNumber = protocol.InvalidPacketNumber
 	c.largestSentAtLastCutback = protocol.InvalidPacketNumber
