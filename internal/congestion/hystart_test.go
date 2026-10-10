@@ -165,7 +165,7 @@ func TestCubicSenderHystart(t *testing.T) {
 		n := int(sender.sender.GetCongestionWindow() / maxDatagramSize)
 		for range n {
 			sender.rttStats.UpdateRTT(rtt, 0)
-			sender.sender.MaybeExitSlowStart()
+			sender.sender.MaybeExitSlowStart(sender.bytesInFlight)
 			sender.ackedPacketNumber++
 			sender.sender.OnPacketAcked(sender.ackedPacketNumber, maxDatagramSize, sender.bytesInFlight, sender.clock.Now())
 			sender.bytesInFlight -= maxDatagramSize
@@ -201,4 +201,25 @@ func TestCubicSenderHystart(t *testing.T) {
 	require.False(t, sender.sender.InSlowStart())
 	require.Greater(t, sender.sender.slowStartThreshold, cwnd)
 	require.GreaterOrEqual(t, sender.sender.GetCongestionWindow(), sender.sender.slowStartThreshold)
+}
+
+func TestCubicSenderHystartIgnoresApplicationLimitedSamples(t *testing.T) {
+	sender := newTestCubicSender(true)
+	// An application that only keeps a few packets in flight: the queue those build doesn't say
+	// anything about the window.
+	ackRound := func(rtt time.Duration) {
+		for range 2 * hystartNRTTSample {
+			sender.SendAvailableSendWindowLen(maxDatagramSize)
+			sender.rttStats.UpdateRTT(rtt, 0)
+			sender.sender.MaybeExitSlowStart(2 * maxDatagramSize)
+			sender.ackedPacketNumber++
+			sender.sender.OnPacketAcked(sender.ackedPacketNumber, maxDatagramSize, 2*maxDatagramSize, sender.clock.Now())
+			sender.bytesInFlight -= maxDatagramSize
+		}
+	}
+	ackRound(40 * time.Millisecond)
+	ackRound(80 * time.Millisecond)
+	ackRound(80 * time.Millisecond)
+	require.False(t, sender.sender.hystart.InConservativeSlowStart())
+	require.True(t, sender.sender.InSlowStart())
 }

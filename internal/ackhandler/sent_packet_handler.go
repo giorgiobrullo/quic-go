@@ -429,7 +429,7 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 				}
 				h.largestAckedTime = p.SendTime
 			}
-			h.congestion.MaybeExitSlowStart()
+			h.congestion.MaybeExitSlowStart(priorInFlight)
 		}
 	}
 

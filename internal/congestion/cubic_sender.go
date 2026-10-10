@@ -197,8 +197,17 @@ func (c *cubicSender) GetCongestionWindow() protocol.ByteCount {
 	return c.congestionWindow
 }
 
-func (c *cubicSender) MaybeExitSlowStart() {
-	if c.InSlowStart() && c.hystart.OnRTTSample(c.rttStats.LatestRTT()) {
+// MaybeExitSlowStart is called for every ACK that yields an RTT sample, with the bytes in flight
+// before it.
+func (c *cubicSender) MaybeExitSlowStart(priorInFlight protocol.ByteCount) {
+	// HyStart++ looks for the queue that the window builds at the bottleneck. While the sender
+	// doesn't use its window (an application feeding data in bursts), that queue drains, and the
+	// RTT samples close to the path's minimum would end Conservative Slow Start: slow start then
+	// ran on to a burst of losses at several times the bandwidth-delay product.
+	if !c.InSlowStart() || !c.isCwndLimited(priorInFlight) {
+		return
+	}
+	if c.hystart.OnRTTSample(c.rttStats.LatestRTT()) {
 		// exit slow start
 		c.slowStartThreshold = c.congestionWindow
 		c.maybeQlogStateChange(qlog.CongestionStateCongestionAvoidance)

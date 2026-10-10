@@ -71,7 +71,7 @@ func (s *testCubicSender) SendAvailableSendWindowLen(packetLength protocol.ByteC
 
 func (s *testCubicSender) AckNPackets(n int) {
 	s.rttStats.UpdateRTT(60*time.Millisecond, 0)
-	s.sender.MaybeExitSlowStart()
+	s.sender.MaybeExitSlowStart(s.bytesInFlight)
 	for range n {
 		s.ackedPacketNumber++
 		s.sender.OnPacketAcked(s.ackedPacketNumber, maxDatagramSize, s.bytesInFlight, s.clock.Now())
@@ -525,7 +525,7 @@ func TestCubicSenderSlowStartsUpToMaximumCongestionWindow(t *testing.T) {
 	)
 
 	for i := 1; i < protocol.MaxCongestionWindowPackets; i++ {
-		sender.MaybeExitSlowStart()
+		sender.MaybeExitSlowStart(sender.GetCongestionWindow())
 		sender.OnPacketAcked(protocol.PacketNumber(i), 1350, sender.GetCongestionWindow(), clock.Now())
 	}
 	require.Equal(t, initialMaxCongestionWindow, sender.GetCongestionWindow())

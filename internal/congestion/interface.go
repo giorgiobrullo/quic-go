@@ -11,7 +11,7 @@ type SendAlgorithm interface {
 	HasPacingBudget(now monotime.Time) bool
 	OnPacketSent(sentTime monotime.Time, bytesInFlight protocol.ByteCount, packetNumber protocol.PacketNumber, bytes protocol.ByteCount, isRetransmittable bool)
 	CanSend(bytesInFlight protocol.ByteCount) bool
-	MaybeExitSlowStart()
+	MaybeExitSlowStart(priorInFlight protocol.ByteCount)
 	OnPacketAcked(number protocol.PacketNumber, ackedBytes protocol.ByteCount, priorInFlight protocol.ByteCount, eventTime monotime.Time)
 	OnCongestionEvent(number protocol.PacketNumber, lostBytes protocol.ByteCount, priorInFlight protocol.ByteCount)
 	// OnSpuriousLoss is called when a packet that was reported to OnCongestionEvent is acknowledged.
