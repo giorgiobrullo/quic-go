@@ -465,6 +465,37 @@ func TestCubicSenderSpuriousLossAfterWindowGrowth(t *testing.T) {
 	require.Zero(t, sender.sender.undoState)
 }
 
+func TestCubicSenderSpuriousLossRestoresHystart(t *testing.T) {
+	for _, css := range []bool{false, true} {
+		t.Run(fmt.Sprintf("in CSS %t", css), func(t *testing.T) {
+			sender := newTestCubicSender(false)
+			sender.SendAvailableSendWindow()
+			sender.AckNPackets(2)
+			if css {
+				sender.sender.hystart.inCSS = true
+				sender.sender.hystart.cssRounds = 2
+			}
+			saved := sender.sender.hystart
+			window := sender.sender.GetCongestionWindow()
+
+			sender.LoseNPackets(1)
+			require.True(t, sender.sender.hystart.done)
+			require.False(t, sender.sender.InSlowStart())
+			sender.SendAvailableSendWindow()
+			lastSent := sender.packetNumber - 1
+
+			sender.sender.OnSpuriousLoss(3)
+			require.Equal(t, window, sender.sender.GetCongestionWindow())
+			require.True(t, sender.sender.InSlowStart())
+			require.False(t, sender.sender.hystart.done)
+			require.Equal(t, css, sender.sender.hystart.InConservativeSlowStart())
+			require.Equal(t, saved.cssRounds, sender.sender.hystart.cssRounds)
+			// packets sent while the cutback was in effect still delimit the next round
+			require.Equal(t, lastSent, sender.sender.hystart.lastSentPacketNumber)
+		})
+	}
+}
+
 func TestCubicSenderSpuriousLossWithECN(t *testing.T) {
 	for _, ecnFirst := range []bool{false, true} {
 		t.Run(fmt.Sprintf("ECN first %t", ecnFirst), func(t *testing.T) {

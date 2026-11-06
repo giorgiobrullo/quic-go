@@ -27,6 +27,9 @@ type renoUndoState struct {
 	largestSentAtLastCutback protocol.PacketNumber
 	// Includes ECN events, which cannot be undone by spurious-loss reports.
 	numCongestionEvents uint64
+	// A cutback ends HyStart++; undoing it resumes HyStart++ where it was, so that a restored
+	// slow start still has its delay-based exit.
+	hystart hystart
 }
 
 func (s *renoUndoState) IsActive() bool {
@@ -247,6 +250,7 @@ func (c *cubicSender) OnCongestionEvent(packetNumber protocol.PacketNumber, lost
 			numAckedPackets:          c.numAckedPackets,
 			largestSentAtLastCutback: c.largestSentAtLastCutback,
 			numCongestionEvents:      1,
+			hystart:                  c.hystart,
 		}
 	}
 
@@ -293,10 +297,15 @@ func (c *cubicSender) OnSpuriousLoss(packetNumber protocol.PacketNumber) {
 	c.slowStartThreshold = state.slowStartThreshold
 	c.numAckedPackets = state.numAckedPackets
 	c.largestSentAtLastCutback = state.largestSentAtLastCutback
+	lastSent := c.hystart.lastSentPacketNumber
+	c.hystart = state.hystart
+	c.hystart.lastSentPacketNumber = lastSent
 	c.connStats.CongestionWindow.Store(uint64(c.congestionWindow))
 	switch {
 	case c.InRecovery():
 		c.maybeQlogStateChange(qlog.CongestionStateRecovery)
+	case c.InSlowStart() && c.hystart.InConservativeSlowStart():
+		c.maybeQlogStateChange(qlog.CongestionStateConservativeSlowStart)
 	case c.InSlowStart():
 		c.maybeQlogStateChange(qlog.CongestionStateSlowStart)
 	default:
